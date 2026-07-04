@@ -1,66 +1,80 @@
-const counterKey = "mawdhou3-counter-value";
-const lastClickKey = "mawdhou3-counter-last-click";
-const cooldownMs = 2 * 60 * 60 * 1000;
-const maxStoredCount = 1_000_000;
+const cooldownMs = 5 * 60 * 1000;
 
 const counterEl = document.getElementById("counter");
 const buttonEl = document.getElementById("incrementBtn");
 const statusEl = document.getElementById("status");
 
-function readCount() {
-  const stored = Number.parseInt(localStorage.getItem(counterKey) || "0", 10);
-  return Number.isFinite(stored) && stored >= 0 ? Math.min(stored, maxStoredCount) : 0;
-}
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
 
-function readLastClick() {
-  const stored = Number.parseInt(localStorage.getItem(lastClickKey) || "0", 10);
-  return Number.isFinite(stored) && stored > 0 ? stored : 0;
-}
-
-function formatRemaining(ms) {
-  const totalMinutes = Math.ceil(ms / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-
-  if (hours <= 0) {
-    return `${Math.max(minutes, 1)} minute${minutes === 1 ? "" : "s"}`;
+  if (minutes === 0) {
+    return `${seconds}s`;
   }
 
-  return `${hours} hour${hours === 1 ? "" : "s"}${minutes > 0 ? ` ${minutes} minute${minutes === 1 ? "" : "s"}` : ""}`;
+  return `${minutes}m ${seconds}s`;
 }
 
-function updateUI() {
-  const count = readCount();
-  const lastClick = readLastClick();
-  const now = Date.now();
-  const nextAllowedAt = lastClick + cooldownMs;
-  const locked = lastClick > 0 && now < nextAllowedAt;
+async function loadState() {
+  const response = await fetch("/api/counter", { cache: "no-store" });
 
-  counterEl.textContent = String(count);
-  buttonEl.disabled = locked;
+  if (!response.ok) {
+    throw new Error("Failed to load counter state");
+  }
 
-  if (locked) {
-    const remaining = nextAllowedAt - now;
-    statusEl.textContent = `Locked for ${formatRemaining(remaining)}.`;
-  } else {
-    statusEl.textContent = "Ready to add one.";
+  return response.json();
+}
+
+async function refresh() {
+  try {
+    const state = await loadState();
+    const locked = state.locked === true;
+
+    counterEl.textContent = String(state.count ?? 40);
+    buttonEl.disabled = locked;
+
+    if (locked) {
+      statusEl.textContent = `Locked for ${formatDuration(state.remainingMs ?? cooldownMs)}.`;
+    } else {
+      statusEl.textContent = "Ready to add one.";
+    }
+  } catch {
+    statusEl.textContent = "Unable to load the shared counter right now.";
+    buttonEl.disabled = true;
   }
 }
 
-buttonEl.addEventListener("click", () => {
-  const lastClick = readLastClick();
-  const now = Date.now();
+buttonEl.addEventListener("click", async () => {
+  buttonEl.disabled = true;
 
-  if (lastClick > 0 && now - lastClick < cooldownMs) {
-    updateUI();
-    return;
+  try {
+    const response = await fetch("/api/counter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ action: "increment" })
+    });
+
+    const state = await response.json();
+
+    if (!response.ok) {
+      statusEl.textContent = state?.message || "Try again later.";
+      await refresh();
+      return;
+    }
+
+    counterEl.textContent = String(state.count ?? 40);
+    statusEl.textContent = `Updated. Locked for ${formatDuration(cooldownMs)}.`;
+    buttonEl.disabled = true;
+
+    setTimeout(refresh, 1000);
+  } catch {
+    statusEl.textContent = "Update failed. Please try again.";
+    await refresh();
   }
-
-  const current = readCount();
-  localStorage.setItem(counterKey, String(current + 1));
-  localStorage.setItem(lastClickKey, String(now));
-  updateUI();
 });
 
-window.addEventListener("storage", updateUI);
-updateUI();
+refresh();
+setInterval(refresh, 15000);
